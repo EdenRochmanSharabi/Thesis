@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import logging
 import math
 from tabulate import tabulate
+import random
+import copy
+import matplotlib.pyplot as plt
+from multiprocessing import Pool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,12 +77,37 @@ class Solver(ABC):
     """
     Abstract base class for solvers.
     """
+
     @abstractmethod
     def solve(self, game: MachineTimeGame):
         """
         Solves the game and returns the optimal allocations.
         """
         pass
+    @staticmethod
+    def compute_best_response(dept, x0, others_alloc, alpha, bounds):
+        """
+        Compute the best response for a department given the current allocations.
+        """
+        def best_response_function(x):
+            x_i = x[0]
+            total_alloc = others_alloc + x_i
+            if total_alloc > 100:
+                return 1e6  # Penalize allocations that exceed the limit
+            return -dept.utility(x_i, total_alloc, alpha)
+
+        constraints = {'type': 'ineq', 'fun': lambda x: 100 - (others_alloc + x[0])}
+
+        res = minimize(
+            best_response_function,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'ftol': 1e-9, 'disp': False}
+        )
+
+        return res.x[0]
 class OptimizationSolver(Solver):
     """
     Solver that uses optimization techniques to find the optimal allocations.
@@ -129,21 +158,20 @@ class OptimizationSolver(Solver):
             options={'ftol': 1e-9, 'disp': False}
         )
 
-        if result.success:
-            # Update game with the optimal allocations
-            game.set_allocations(result.x)
-            return result.x
-        else:
-            raise ValueError("Optimization failed.")
+        try:
+            if result.success:
+                # Update game with the optimal allocations
+                game.set_allocations(result.x)
+                return result.x
+            else:
+                raise ValueError("Optimization failed.")
+        except ValueError as e:
+            print(f"Error: {e}")
 class BestResponseSolver(Solver):
-    """
-    Solver that uses best-response dynamics to find the Nash Equilibrium.
-    """
     def __init__(self, max_iterations=1000, tolerance=1e-6):
         self.max_iterations = max_iterations
         self.tolerance = tolerance
-
-    def solve(self, game: MachineTimeGame):
+    def solve(self, game):
         num_departments = len(game.departments)
         allocations = np.full(num_departments, 100 / num_departments)
 
@@ -152,40 +180,12 @@ class BestResponseSolver(Solver):
 
             for i, dept in enumerate(game.departments):
                 others_sum = sum(old_allocations) - old_allocations[i]
-
-                def best_response_function(x):
-                    x_i = x[0]
-                    total_alloc = others_sum + x_i
-                    if total_alloc > 100:
-                        # Penalize allocations that exceed the total limit
-                        return 1e6
-                    else:
-                        return -dept.utility(x_i, total_alloc, game.alpha)
-
-                # Bounds for x_i
-                # bounds = [(0, None)] # This gives insane numbers
-                bounds = [(0, 100 - others_sum)] # Playing with x_i so it cannot exceed the remaining available time
-
-                # Constraints to ensure total allocation does not exceed 100 hours
-                constraints = {'type': 'ineq', 'fun': lambda x: 100 - (others_sum + x[0])}
-
-                # Initial guess for the allocation
+                bounds = [(0, 100 - others_sum)]
                 x0 = np.array([allocations[i]])
 
-                # Optimize
-                res = minimize(
-                    best_response_function,
-                    x0,
-                    method='SLSQP',
-                    bounds=bounds,
-                    constraints=constraints,
-                    options={'ftol': 1e-9, 'disp': False}
-                )
+                # Use the static method for best response calculation
+                allocations[i] = Solver.compute_best_response(dept, x0, others_sum, game.alpha, bounds)
 
-                # Update allocation for department i
-                allocations[i] = res.x[0]
-
-            # Check convergence
             if np.linalg.norm(allocations - old_allocations) < self.tolerance:
                 game.set_allocations(allocations)
                 return allocations
@@ -241,71 +241,38 @@ class ReplicatorDynamicsSolver(Solver):
         game.set_allocations(allocations)
         return allocations
 class FictitiousPlaySolver(Solver):
-    """
-    Solver that uses fictitious play to find an equilibrium.
-    """
     def __init__(self, max_iterations=1000, tolerance=1e-6):
         self.max_iterations = max_iterations
         self.tolerance = tolerance
-
-    def solve(self, game: MachineTimeGame):
+    def solve(self, game):
         num_departments = len(game.departments)
-        # Initialize allocations and historical averages
         allocations = np.full(num_departments, 100 / num_departments)
         historical_allocations = np.zeros((self.max_iterations + 1, num_departments))
         historical_allocations[0] = allocations.copy()
 
         for iteration in range(1, self.max_iterations + 1):
             old_allocations = allocations.copy()
-            # Update historical averages
             avg_allocations = np.mean(historical_allocations[:iteration], axis=0)
 
             for i, dept in enumerate(game.departments):
                 others_avg_alloc = sum(avg_allocations) - avg_allocations[i]
-                others_avg_alloc = min(others_avg_alloc, 100)  # Ensure total does not exceed 100
-
-                def best_response_function(x):
-                    x_i = x[0]
-                    total_alloc = others_avg_alloc + x_i
-                    if total_alloc > 100:
-                        return 1e6  # Penalize allocations that exceed the limit
-                    return -dept.utility(x_i, total_alloc, game.alpha)
-
-                # Bounds for x_i
+                others_avg_alloc = min(others_avg_alloc, 100)
                 bounds = [(0, None)]
-                # Constraints to ensure total allocation does not exceed 100 hours
-                constraints = {'type': 'ineq', 'fun': lambda x: 100 - (others_avg_alloc + x[0])}
-                # Initial guess for the allocation
                 x0 = np.array([allocations[i]])
 
-                # Optimize
-                res = minimize(
-                    best_response_function,
-                    x0,
-                    method='SLSQP',
-                    bounds=bounds,
-                    constraints=constraints,
-                    options={'ftol': 1e-9, 'disp': False}
-                )
+                allocations[i] = Solver.compute_best_response(dept, x0, others_avg_alloc, game.alpha, bounds)
 
-                # Update allocation for department i
-                allocations[i] = res.x[0]
-
-            # Record allocations
             historical_allocations[iteration] = allocations.copy()
 
-            # Check convergence
             if np.linalg.norm(allocations - old_allocations) < self.tolerance:
                 break
 
-        # Normalize final allocations to sum to 100
         total_alloc = sum(allocations)
         if total_alloc > 0:
             allocations = (allocations / total_alloc) * 100
         else:
             allocations = np.full(num_departments, 100 / num_departments)
 
-        # Update game with the final allocations
         game.set_allocations(allocations)
         return allocations
 class MCTSSolver(Solver):
@@ -313,26 +280,29 @@ class MCTSSolver(Solver):
     Improved MCTS solver that uses smart rollout and better state evaluation.
     """
 
-    def __init__(self, iterations=1000, exploration_constant=1.414, num_buckets=10):
+    def __init__(self, iterations=1000, exploration_constant=math.sqrt(2), num_buckets=10, total_hours=100, spread=20):
         self.iterations = iterations
         self.exploration_constant = exploration_constant
-        self.num_buckets = num_buckets  # Number of discrete allocation levels
+        self.num_buckets = num_buckets
+        self.total_hours = total_hours
+        self.spread = spread
 
     def solve(self, game: MachineTimeGame):
-        num_departments = len(game.departments)
-        total_hours = 100
+        total_hours = self.total_hours
 
         # Initialize the root node with proportional allocation based on coefficients
         coefficients = [dept.coefficient for dept in game.departments]
         total_coeff = sum(coefficients)
-        initial_state = [coeff / total_coeff * 100 for coeff in coefficients]
+        initial_state = [coeff / total_coeff * total_hours for coeff in coefficients]
 
         root = MCTSNode(
             state=initial_state,
             parent=None,
             game=game,
             department_index=0,
-            num_buckets=self.num_buckets
+            num_buckets=self.num_buckets,
+            total_hours=self.total_hours,
+            spread=self.spread
         )
 
         best_utility = float('-inf')
@@ -352,7 +322,7 @@ class MCTSSolver(Solver):
             # Simulation
             reward = node.smart_rollout()
 
-            # Update best solution if found
+            # Update the best solution if found
             if reward > best_utility:
                 best_utility = reward
                 best_allocation = node.get_normalized_state()
@@ -361,19 +331,21 @@ class MCTSSolver(Solver):
             node.backpropagate(reward)
 
         # If no better solution found, use the most visited child's allocation
-        if best_allocation is None:
+        if best_allocation is None and root.children:
             best_child = max(root.children, key=lambda n: n.visits)
             best_allocation = best_child.get_normalized_state()
 
         game.set_allocations(best_allocation)
         return best_allocation
 class MCTSNode:
-    def __init__(self, state, parent, game, department_index, num_buckets):
+    def __init__(self, state, parent, game, department_index, num_buckets, total_hours=100, spread=20):
         self.state = state
         self.parent = parent
         self.game = game
         self.department_index = department_index
         self.num_buckets = num_buckets
+        self.total_hours = total_hours
+        self.spread = spread
         self.children = []
         self.visits = 0
         self.total_reward = 0
@@ -389,13 +361,13 @@ class MCTSNode:
         target_proportion = dept_coefficient / total_coefficient
 
         # Generate actions around the target proportion
-        base_allocation = target_proportion * 100
-        spread = 20  # Allow ±20% variation around the target
+        base_allocation = target_proportion * self.total_hours
+        spread = self.spread  # Allow ±spread variation around the target
         min_alloc = max(0, base_allocation - spread)
-        max_alloc = min(100, base_allocation + spread)
+        max_alloc = min(self.total_hours, base_allocation + spread)
 
         # Create discrete steps within this range
-        step_size = (max_alloc - min_alloc) / self.num_buckets
+        step_size = (max_alloc - min_alloc) / self.num_buckets if self.num_buckets > 0 else max_alloc - min_alloc
         actions = [min_alloc + i * step_size for i in range(self.num_buckets + 1)]
         return actions
 
@@ -415,7 +387,9 @@ class MCTSNode:
             parent=self,
             game=self.game,
             department_index=self.department_index + 1,
-            num_buckets=self.num_buckets
+            num_buckets=self.num_buckets,
+            total_hours=self.total_hours,
+            spread=self.spread
         )
         self.children.append(child)
         return child
@@ -435,7 +409,7 @@ class MCTSNode:
         if remaining_departments > 0:
             # Calculate remaining hours
             used_hours = sum(current_state[:self.department_index + 1])
-            remaining_hours = 100 - used_hours
+            remaining_hours = self.total_hours - used_hours
 
             # Get coefficients for remaining departments
             remaining_coeffs = [self.game.departments[i].coefficient
@@ -483,16 +457,15 @@ class MCTSNode:
         return max(self.children, key=ucb1)
 
     def get_normalized_state(self):
-        """Return the state with allocations normalized to sum to 100."""
+        """Return the state with allocations normalized to sum to total_hours."""
         return self._normalize_allocation(self.state)
 
-    @staticmethod
-    def _normalize_allocation(allocation):
-        """Helper method to normalize allocations to sum to 100."""
+    def _normalize_allocation(self, allocation):
+        """Helper method to normalize allocations to sum to total_hours."""
         total = sum(allocation)
         if total == 0:
-            return [100 / len(allocation)] * len(allocation)
-        return [x * (100 / total) for x in allocation]
+            return [self.total_hours / len(allocation)] * len(allocation)
+        return [x * (self.total_hours / total) for x in allocation]
 class AllocationAlgorithmSolver(Solver):
     """
     Solver that implements the iterative allocation algorithm.
@@ -555,27 +528,6 @@ class AllocationAlgorithmSolver(Solver):
             return np.full(len(allocations), 100 / len(allocations))
         return allocations * (100 / total)
 
-def create_departments():
-    """Creates and returns a fresh list of Department instances."""
-    return [
-        Department(name='A', coefficient=0.5),
-        Department(name='B', coefficient=1),
-        Department(name='C', coefficient=0.3),
-        Department(name='D', coefficient=10),
-        Department(name='E', coefficient=15),
-        Department(name='F', coefficient=20),
-        Department(name='G', coefficient=0.1),
-        Department(name='H', coefficient=5),
-        Department(name='I', coefficient=8),
-        Department(name='J', coefficient=12),
-        Department(name='K', coefficient=0.2),
-        Department(name='L', coefficient=25),
-        Department(name='M', coefficient=3),
-        Department(name='N', coefficient=1.5),
-        Department(name='O', coefficient=0.7),
-        Department(name='P', coefficient=0.05),
-    ]
-
 
 def generate_allocation_table(games_local, department_local):
     allocation_data = []
@@ -629,16 +581,79 @@ def generate_utility_difference_table(games_local):
     diff_headers = ['Total Utility Difference', 'Opt - BR', 'Opt - RD', 'Opt - FP', 'Opt - MCTS', 'Opt - AllocAlg']
     print("\nUtility Differences from Optimization:")
     print(tabulate(utility_diff_data, headers=diff_headers, floatfmt='+.2f', tablefmt='grid'))
-if __name__ == "__main__":
-    # Fresh game of each solver
-    game_opt = MachineTimeGame(departments=create_departments(), alpha=10)  # Optimization
-    game_br = MachineTimeGame(departments=create_departments(), alpha=10)  # Best Response
-    game_rd = MachineTimeGame(departments=create_departments(), alpha=10)  # Replicator Dynamics
-    game_fp = MachineTimeGame(departments=create_departments(), alpha=10)  # Fictitious Play
-    game_mcts = MachineTimeGame(departments=create_departments(), alpha=10)  # MCTS
-    game_alloc = MachineTimeGame(departments=create_departments(), alpha=10)  # Allocation Algorithm
+def create_departments(num_departments=10, lowerbound=1, upperbound=10):
+    """Creates and returns a list of Department instances with unique names and random coefficients."""
+    departments = []
+    names = []
+    for i in range(1, num_departments + 1):
+        name = f'Dept_{i}'
+        coefficient = random.randint(lowerbound, upperbound)
+        departments.append(Department(name=name, coefficient=coefficient))
+        names.append(name)
+    return departments, names
+def plot_allocations(solver_games, department_labels):
+    """Plots allocation data for each solver."""
+    solver_allocations = {
+        solver_label: [dept.allocation for dept in game_instance.departments]
+        for solver_label, game_instance in zip(
+            ['Optimization', 'Best Response', 'Replicator Dynamics',
+             'Fictitious Play', 'MCTS', 'Allocation Algorithm'], solver_games)
+    }
 
-    # Initialize the solvers
+    plt.figure(figsize=(12, 6))
+    for solver_label, allocation_values in solver_allocations.items():
+        plt.plot(department_labels, allocation_values, label=solver_label, marker='o', linestyle='-', markersize=4)
+
+    plt.title("Machine Time Allocations by Solver")
+    plt.xlabel("Departments")
+    plt.ylabel("Allocation (hours)")
+    plt.legend()
+    plt.xticks(rotation=90)  # Rotate department labels for readability
+    plt.tight_layout()
+    plt.show()
+def plot_utilities(solver_games, department_labels):
+    """Plots utility data for each solver."""
+    solver_utilities = {
+        solver_label: game_instance.compute_utilities()
+        for solver_label, game_instance in zip(
+            ['Optimization', 'Best Response', 'Replicator Dynamics',
+             'Fictitious Play', 'MCTS', 'Allocation Algorithm'], solver_games)
+    }
+
+    plt.figure(figsize=(12, 6))
+    for solver_label, utility_values in solver_utilities.items():
+        plt.plot(department_labels, utility_values, label=solver_label, marker='o', linestyle='-', markersize=4)
+
+    plt.title("Utilities by Solver")
+    plt.xlabel("Departments")
+    plt.ylabel("Utility")
+    plt.legend()
+    plt.xticks(rotation=90)  # Rotate department labels for readability
+    plt.tight_layout()
+    plt.show()
+def parallelization_solver(args):
+    solver, game = args
+    solver.solve(game)
+    return game  # Return the game for later access
+if __name__ == "__main__":
+    # Initialize base departments and names
+    base_departments, department_names = create_departments(num_departments=10, lowerbound=10, upperbound=200)
+
+    # Deep copies for each solver instance
+    departments_opt = copy.deepcopy(base_departments)
+    departments_br = copy.deepcopy(base_departments)
+    departments_rd = copy.deepcopy(base_departments)
+    departments_fp = copy.deepcopy(base_departments)
+    departments_mcts = copy.deepcopy(base_departments)
+    departments_alloc = copy.deepcopy(base_departments)
+
+    game_opt = MachineTimeGame(departments=departments_opt, alpha=10)
+    game_br = MachineTimeGame(departments=departments_br, alpha=10)
+    game_rd = MachineTimeGame(departments=departments_rd, alpha=10)
+    game_fp = MachineTimeGame(departments=departments_fp, alpha=10)
+    game_mcts = MachineTimeGame(departments=departments_mcts, alpha=10)
+    game_alloc = MachineTimeGame(departments=departments_alloc, alpha=10)
+
     solver_opt = OptimizationSolver()
     solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
     solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
@@ -646,22 +661,26 @@ if __name__ == "__main__":
     solver_mcts = MCTSSolver(iterations=10, exploration_constant=math.sqrt(2), num_buckets=10)
     solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
 
-    department_names = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P']
+    solvers_and_games = [
+        (solver_opt, game_opt),
+        (solver_br, game_br),
+        (solver_rd, game_rd),
+        (solver_fp, game_fp),
+        (solver_mcts, game_mcts),
+        (solver_alloc, game_alloc)
+    ]
 
+    with Pool(processes=len(solvers_and_games)) as pool:
+        games = pool.map(parallelization_solver, solvers_and_games)
 
-    # Solve each game with the corresponding solver
-    solver_opt.solve(game_opt)
-    solver_br.solve(game_br)
-    solver_rd.solve(game_rd)
-    solver_fp.solve(game_fp)
-    solver_mcts.solve(game_mcts)
-    solver_alloc.solve(game_alloc)
+    # # Plot allocations and utilities
+    # plot_allocations(games, department_names)
+    # plot_utilities(games, department_names)
 
-    # List of games for easy access
-    games = [game_opt, game_br, game_rd, game_fp, game_mcts, game_alloc]
-
-    # Generate tables
+    # Generate tables using the department_names list from create_departments
     generate_allocation_table(games, department_names)
     generate_utility_table(games, department_names)
     generate_comparison_table(games, department_names)
     generate_utility_difference_table(games)
+
+
