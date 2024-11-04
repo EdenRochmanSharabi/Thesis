@@ -9,6 +9,7 @@ import random
 import copy
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,23 +23,54 @@ class Department:
     coefficient: float  # The 'a_i' in the utility function
     allocation: float = 0.0  # Initial machine hours allocation
 
-    def utility(self, x_i, total_allocation, alpha):
+    # def utility(self, x_i, total_allocation, alpha):
+    #     """
+    #     Computes the utility of the department given its allocation.
+    #     """
+    #     if total_allocation > 100:
+    #         penalty_share = x_i / total_allocation if total_allocation > 0 else 0
+    #         penalty_term = alpha * (total_allocation - 100) * penalty_share
+    #     else:
+    #         penalty_term = 0
+    #     return self.coefficient * np.log(x_i + 1) - penalty_term
+
+    # def utility(self, x_i, total_allocation, alpha, capacity):
+    #     """
+    #     Computes the utility of the department given its allocation, optimized for best response dynamics.
+    #     """
+    #     if total_allocation > capacity:
+    #         # Calculate the individual penalty based on the department's share of the total allocation
+    #         penalty_term = alpha * x_i * (total_allocation - capacity) / total_allocation
+    #     else:
+    #         penalty_term = 0
+    #     return self.coefficient * np.log(x_i + 1) - penalty_term
+    def utility(self, x_i, total_allocation, alpha, capacity, noise_level=0.4):
         """
-        Computes the utility of the department given its allocation.
+        Computes the utility of the department given its allocation,
+        adding randomness to the penalty or reward term.
         """
-        if total_allocation > 100:
-            penalty_share = x_i / total_allocation if total_allocation > 0 else 0
-            penalty_term = alpha * (total_allocation - 100) * penalty_share
+        # Calculate the deterministic part of the utility
+        if total_allocation > capacity:
+            penalty_term = alpha * x_i * (total_allocation - capacity) / total_allocation
         else:
             penalty_term = 0
-        return self.coefficient * np.log(x_i + 1) - penalty_term
+
+        # You can adjust `noise_level` to control the intensity of the randomness
+        random_penalty_factor = np.random.uniform(1 - noise_level, 1 + noise_level)
+        random_reward_factor = np.random.uniform(1 - noise_level, 1 + noise_level)
+
+        random_penalty = penalty_term * random_penalty_factor
+        random_reward = self.coefficient * np.log(x_i + 1) * random_reward_factor
+
+        return random_reward - random_penalty
 class MachineTimeGame:
     """
     Represents the machine time allocation game among departments.
     """
-    def __init__(self, departments, alpha=10):
+    def __init__(self, departments, alpha=10, capacity=87):
         self.departments = departments  # List of Department instances
         self.alpha = alpha  # Penalty parameter
+        self.capacity = capacity  # Total machine time capacity
 
     def total_allocation(self, allocations):
         """
@@ -69,7 +101,8 @@ class MachineTimeGame:
             util = dept.utility(
                 dept.allocation,
                 total_alloc,
-                alpha=self.alpha
+                alpha=self.alpha,
+                capacity=self.capacity  # Pass capacity here
             )
             utilities.append(util)
         return utilities
@@ -84,19 +117,20 @@ class Solver(ABC):
         Solves the game and returns the optimal allocations.
         """
         pass
+
     @staticmethod
-    def compute_best_response(dept, x0, others_alloc, alpha, bounds):
+    def compute_best_response(dept, x0, others_alloc, alpha, bounds, capacity):
         """
         Compute the best response for a department given the current allocations.
         """
         def best_response_function(x):
             x_i = x[0]
             total_alloc = others_alloc + x_i
-            if total_alloc > 100:
+            if total_alloc > capacity:
                 return 1e6  # Penalize allocations that exceed the limit
-            return -dept.utility(x_i, total_alloc, alpha)
+            return -dept.utility(x_i, total_alloc, alpha, capacity=capacity)
 
-        constraints = {'type': 'ineq', 'fun': lambda x: 100 - (others_alloc + x[0])}
+        constraints = {'type': 'ineq', 'fun': lambda x: capacity - (others_alloc + x[0])}
 
         res = minimize(
             best_response_function,
@@ -122,17 +156,17 @@ class OptimizationSolver(Solver):
         num_departments = len(game.departments)
         if self.initial_guess is None:
             # Default initial guess: equal allocation
-            x0 = np.full(num_departments, 100 / num_departments)
+            x0 = np.full(num_departments, game.capacity / num_departments)
         else:
             x0 = self.initial_guess
 
         # Bounds: allocations must be non-negative
         bounds = [(0, None) for _ in range(num_departments)]
 
-        # Constraints: total allocation must equal 100 hours
+        # Constraints: total allocation must equal capacity
         constraints = {
             'type': 'eq',
-            'fun': lambda x: 100 - sum(x)
+            'fun': lambda x: sum(x) - game.capacity  # Ensure total allocation equals capacity
         }
 
         # Objective function: negative total utility (since we will minimize)
@@ -143,7 +177,8 @@ class OptimizationSolver(Solver):
                 util = dept.utility(
                     allocations[k],
                     total_alloc,
-                    alpha=game.alpha
+                    alpha=game.alpha,
+                    capacity=game.capacity
                 )
                 total_utility += util
             return -total_utility  # Negative for minimization
@@ -171,20 +206,23 @@ class BestResponseSolver(Solver):
     def __init__(self, max_iterations=1000, tolerance=1e-6):
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+
     def solve(self, game):
         num_departments = len(game.departments)
-        allocations = np.full(num_departments, 100 / num_departments)
+        allocations = np.full(num_departments, game.capacity / num_departments)
 
         for iteration in range(self.max_iterations):
             old_allocations = allocations.copy()
 
             for i, dept in enumerate(game.departments):
                 others_sum = sum(old_allocations) - old_allocations[i]
-                bounds = [(0, 100 - others_sum)]
+                bounds = [(0, game.capacity - others_sum)]
                 x0 = np.array([allocations[i]])
 
                 # Use the static method for best response calculation
-                allocations[i] = Solver.compute_best_response(dept, x0, others_sum, game.alpha, bounds)
+                allocations[i] = Solver.compute_best_response(
+                    dept, x0, others_sum, game.alpha, bounds, game.capacity
+                )
 
             if np.linalg.norm(allocations - old_allocations) < self.tolerance:
                 game.set_allocations(allocations)
@@ -204,7 +242,7 @@ class ReplicatorDynamicsSolver(Solver):
 
     def solve(self, game: MachineTimeGame):
         num_departments = len(game.departments)
-        allocations = np.full(num_departments, 100 / num_departments)
+        allocations = np.full(num_departments, game.capacity / num_departments)
 
         for t in range(self.time_steps):
             old_allocations = allocations.copy()
@@ -213,7 +251,7 @@ class ReplicatorDynamicsSolver(Solver):
 
             # Compute utilities for current allocations
             for i, dept in enumerate(game.departments):
-                util = dept.utility(allocations[i], total_alloc, game.alpha)
+                util = dept.utility(allocations[i], total_alloc, game.alpha, game.capacity)
                 utilities.append(util)
 
             # Compute average utility
@@ -226,12 +264,12 @@ class ReplicatorDynamicsSolver(Solver):
             # Ensure allocations are non-negative
             allocations = np.maximum(allocations, 0)
 
-            # Normalize allocations to sum to 100
+            # Normalize allocations to sum to capacity
             total_alloc = sum(allocations)
             if total_alloc > 0:
-                allocations = (allocations / total_alloc) * 100
+                allocations = (allocations / total_alloc) * game.capacity
             else:
-                allocations = np.full(num_departments, 100 / num_departments)
+                allocations = np.full(num_departments, game.capacity / num_departments)
 
             # Check for convergence
             if np.linalg.norm(allocations - old_allocations) < self.tolerance:
@@ -244,9 +282,10 @@ class FictitiousPlaySolver(Solver):
     def __init__(self, max_iterations=1000, tolerance=1e-6):
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+
     def solve(self, game):
         num_departments = len(game.departments)
-        allocations = np.full(num_departments, 100 / num_departments)
+        allocations = np.full(num_departments, game.capacity / num_departments)
         historical_allocations = np.zeros((self.max_iterations + 1, num_departments))
         historical_allocations[0] = allocations.copy()
 
@@ -256,11 +295,13 @@ class FictitiousPlaySolver(Solver):
 
             for i, dept in enumerate(game.departments):
                 others_avg_alloc = sum(avg_allocations) - avg_allocations[i]
-                others_avg_alloc = min(others_avg_alloc, 100)
+                others_avg_alloc = min(others_avg_alloc, game.capacity)
                 bounds = [(0, None)]
                 x0 = np.array([allocations[i]])
 
-                allocations[i] = Solver.compute_best_response(dept, x0, others_avg_alloc, game.alpha, bounds)
+                allocations[i] = Solver.compute_best_response(
+                    dept, x0, others_avg_alloc, game.alpha, bounds, game.capacity
+                )
 
             historical_allocations[iteration] = allocations.copy()
 
@@ -269,9 +310,9 @@ class FictitiousPlaySolver(Solver):
 
         total_alloc = sum(allocations)
         if total_alloc > 0:
-            allocations = (allocations / total_alloc) * 100
+            allocations = (allocations / total_alloc) * game.capacity
         else:
-            allocations = np.full(num_departments, 100 / num_departments)
+            allocations = np.full(num_departments, game.capacity / num_departments)
 
         game.set_allocations(allocations)
         return allocations
@@ -288,7 +329,8 @@ class MCTSSolver(Solver):
         self.spread = spread
 
     def solve(self, game: MachineTimeGame):
-        total_hours = self.total_hours
+        total_hours = game.capacity  # Use game's capacity
+        self.total_hours = total_hours  # Update total_hours in the solver
 
         # Initialize the root node with proportional allocation based on coefficients
         coefficients = [dept.coefficient for dept in game.departments]
@@ -476,19 +518,20 @@ class AllocationAlgorithmSolver(Solver):
         self.max_iterations = max_iterations
 
     def solve(self, game: MachineTimeGame):
+        self.game = game  # Store game reference to access capacity
         num_departments = len(game.departments)
         allocations = np.zeros(num_departments)  # Initial allocations: W(0) = 0
         total_alloc = sum(allocations)  # Total allocation W
         t = 0  # Time step t
 
-        while total_alloc < 100 and t < self.max_iterations:
+        while total_alloc < game.capacity and t < self.max_iterations:
             old_allocations = allocations.copy()
             total_alloc = sum(allocations)  # Update W(t)
 
             for i, dept in enumerate(game.departments):
                 if np.random.rand() < self.activation_prob:  # Activation probability ν_x^act
                     # Possible new allocation by increasing delta
-                    if total_alloc + self.delta <= 100:
+                    if total_alloc + self.delta <= game.capacity:
                         new_allocations = allocations.copy()
                         new_allocations[i] += self.delta  # Increment allocation by δ for agent x
                         new_total_alloc = total_alloc + self.delta  # Update W' = W + δ
@@ -497,12 +540,14 @@ class AllocationAlgorithmSolver(Solver):
                         current_utility = dept.utility(
                             allocations[i],  # Current allocation W_x
                             total_alloc,  # Current total allocation W
-                            game.alpha  # Penalty parameter α
+                            game.alpha,  # Penalty parameter α
+                            game.capacity
                         )
                         new_utility = dept.utility(
                             new_allocations[i],  # Potential new allocation W'_x
                             new_total_alloc,  # New total allocation W'
-                            game.alpha
+                            game.alpha,
+                            game.capacity
                         )
                         delta_utility = new_utility - current_utility  # ΔUtility
 
@@ -516,19 +561,16 @@ class AllocationAlgorithmSolver(Solver):
             if np.allclose(allocations, old_allocations):  # Convergence check
                 break
 
-        # Normalize allocations to sum to 100
+        # Normalize allocations to sum to capacity
         allocations = self._normalize_allocations(allocations)  # Normalize W to satisfy constraint
         game.set_allocations(allocations)
         return allocations
 
-    @staticmethod
-    def _normalize_allocations(allocations):
+    def _normalize_allocations(self, allocations):
         total = sum(allocations)
         if total == 0:
-            return np.full(len(allocations), 100 / len(allocations))
-        return allocations * (100 / total)
-
-
+            return np.full(len(allocations), self.game.capacity / len(allocations))
+        return allocations * (self.game.capacity / total)
 def generate_allocation_table(games_local, department_local):
     allocation_data = []
     for i, dept_name in enumerate(department_local):
@@ -635,52 +677,132 @@ def parallelization_solver(args):
     solver, game = args
     solver.solve(game)
     return game  # Return the game for later access
+def generate_prime_capacities(start, end):
+    """Generates a list of prime numbers within a given range."""
+    primes = []
+    for num in range(start, end + 1):
+        if num > 1:
+            is_prime = True
+            for i in range(2, int(math.isqrt(num)) + 1):
+                if num % i == 0:
+                    is_prime = False
+                    break
+            if is_prime:
+                primes.append(num)
+    return primes
 if __name__ == "__main__":
     # Initialize base departments and names
-    base_departments, department_names = create_departments(num_departments=10, lowerbound=10, upperbound=200)
+    # base_departments, department_names = create_departments(num_departments=9, lowerbound=0, upperbound=5000)
+    # capacity = 2389
+    # # Deep copies for each solver instance
+    # departments_opt = copy.deepcopy(base_departments)
+    # departments_br = copy.deepcopy(base_departments)
+    # departments_rd = copy.deepcopy(base_departments)
+    # departments_fp = copy.deepcopy(base_departments)
+    # departments_mcts = copy.deepcopy(base_departments)
+    # departments_alloc = copy.deepcopy(base_departments)
+    #
+    # game_opt = MachineTimeGame(departments=departments_opt, alpha=10, capacity=capacity)
+    # game_br = MachineTimeGame(departments=departments_br, alpha=10, capacity=capacity)
+    # game_rd = MachineTimeGame(departments=departments_rd, alpha=10, capacity=capacity)
+    # game_fp = MachineTimeGame(departments=departments_fp, alpha=10, capacity=capacity)
+    # game_mcts = MachineTimeGame(departments=departments_mcts, alpha=10, capacity=capacity)
+    # game_alloc = MachineTimeGame(departments=departments_alloc, alpha=10, capacity=capacity)
+    #
+    # solver_opt = OptimizationSolver()
+    # solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
+    # solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
+    # solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
+    # solver_mcts = MCTSSolver(iterations=10, exploration_constant=math.sqrt(2), num_buckets=10, total_hours=game_mcts.capacity)
+    # solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
+    #
+    # solvers_and_games = [
+    #     (solver_opt, game_opt),
+    #     (solver_br, game_br),
+    #     (solver_rd, game_rd),
+    #     (solver_fp, game_fp),
+    #     (solver_mcts, game_mcts),
+    #     (solver_alloc, game_alloc)
+    # ]
+    #
+    # with Pool(processes=len(solvers_and_games)) as pool:
+    #     games = pool.map(parallelization_solver, solvers_and_games)
+    #
+    # # # Plot allocations and utilities
+    # # plot_allocations(games, department_names)
+    # # plot_utilities(games, department_names)
+    #
+    # # Generate tables using the department_names list from create_departments
+    # generate_allocation_table(games, department_names)
+    # generate_utility_table(games, department_names)
+    # generate_comparison_table(games, department_names)
+    # generate_utility_difference_table(games)
+    # New main code that runs simulations over different prime capacities
+    # Capacities as prime numbers
+    # Generate a larger list of prime capacities
+    capacities = generate_prime_capacities(1000, 2000)
 
-    # Deep copies for each solver instance
-    departments_opt = copy.deepcopy(base_departments)
-    departments_br = copy.deepcopy(base_departments)
-    departments_rd = copy.deepcopy(base_departments)
-    departments_fp = copy.deepcopy(base_departments)
-    departments_mcts = copy.deepcopy(base_departments)
-    departments_alloc = copy.deepcopy(base_departments)
+    results = []
 
-    game_opt = MachineTimeGame(departments=departments_opt, alpha=10)
-    game_br = MachineTimeGame(departments=departments_br, alpha=10)
-    game_rd = MachineTimeGame(departments=departments_rd, alpha=10)
-    game_fp = MachineTimeGame(departments=departments_fp, alpha=10)
-    game_mcts = MachineTimeGame(departments=departments_mcts, alpha=10)
-    game_alloc = MachineTimeGame(departments=departments_alloc, alpha=10)
+    solver_names = ['Optimization', 'Best Response', 'Replicator Dynamics',
+                    'Fictitious Play', 'MCTS', 'Allocation Algorithm']
 
-    solver_opt = OptimizationSolver()
-    solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
-    solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
-    solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
-    solver_mcts = MCTSSolver(iterations=10, exploration_constant=math.sqrt(2), num_buckets=10)
-    solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
+    random.seed(42)
 
-    solvers_and_games = [
-        (solver_opt, game_opt),
-        (solver_br, game_br),
-        (solver_rd, game_rd),
-        (solver_fp, game_fp),
-        (solver_mcts, game_mcts),
-        (solver_alloc, game_alloc)
-    ]
+    for capacity in capacities:
+        base_departments, department_names = create_departments(num_departments=9, lowerbound=0, upperbound=5000)
 
-    with Pool(processes=len(solvers_and_games)) as pool:
-        games = pool.map(parallelization_solver, solvers_and_games)
+        departments_opt = copy.deepcopy(base_departments)
+        departments_br = copy.deepcopy(base_departments)
+        departments_rd = copy.deepcopy(base_departments)
+        departments_fp = copy.deepcopy(base_departments)
+        departments_mcts = copy.deepcopy(base_departments)
+        departments_alloc = copy.deepcopy(base_departments)
 
-    # # Plot allocations and utilities
-    # plot_allocations(games, department_names)
-    # plot_utilities(games, department_names)
+        game_opt = MachineTimeGame(departments=departments_opt, alpha=10, capacity=capacity)
+        game_br = MachineTimeGame(departments=departments_br, alpha=10, capacity=capacity)
+        game_rd = MachineTimeGame(departments=departments_rd, alpha=10, capacity=capacity)
+        game_fp = MachineTimeGame(departments=departments_fp, alpha=10, capacity=capacity)
+        game_mcts = MachineTimeGame(departments=departments_mcts, alpha=10, capacity=capacity)
+        game_alloc = MachineTimeGame(departments=departments_alloc, alpha=10, capacity=capacity)
 
-    # Generate tables using the department_names list from create_departments
-    generate_allocation_table(games, department_names)
-    generate_utility_table(games, department_names)
-    generate_comparison_table(games, department_names)
-    generate_utility_difference_table(games)
+        solver_opt = OptimizationSolver()
+        solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
+        solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
+        solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
+        solver_mcts = MCTSSolver(iterations=10, exploration_constant=math.sqrt(2), num_buckets=10,
+                                 total_hours=game_mcts.capacity)
+        solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
 
+        solvers_and_games = [
+            (solver_opt, game_opt),
+            (solver_br, game_br),
+            (solver_rd, game_rd),
+            (solver_fp, game_fp),
+            (solver_mcts, game_mcts),
+            (solver_alloc, game_alloc)
+        ]
+
+        with Pool(processes=len(solvers_and_games)) as pool:
+            games = pool.map(parallelization_solver, solvers_and_games)
+
+        total_utilities = {'Capacity': capacity}
+        for solver_name, game in zip(solver_names, games):
+            total_utility = sum(game.compute_utilities())
+            total_utilities[solver_name] = total_utility
+
+        results.append(total_utilities)
+
+    df_results = pd.DataFrame(results)
+
+    df_results.to_csv('total_utilities_by_capacity.csv', index=False)
+
+    for index, result in df_results.iterrows():
+        capacity = result['Capacity']
+        print(f"Capacity: {capacity}")
+        solver_utilities = result.drop(labels=['Capacity']).to_dict()
+        sorted_solvers = sorted(solver_utilities.items(), key=lambda item: item[1], reverse=True)
+        for solver_name, utility in sorted_solvers:
+            print(f"  {solver_name}: Total Utility = {utility:.2f}")
+        print()
 
