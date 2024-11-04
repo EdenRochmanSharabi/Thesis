@@ -329,13 +329,12 @@ class MCTSSolver(Solver):
         self.spread = spread
 
     def solve(self, game: MachineTimeGame):
-        total_hours = game.capacity  # Use game's capacity
-        self.total_hours = total_hours  # Update total_hours in the solver
+        self.total_hours = game.capacity
 
-        # Initialize the root node with proportional allocation based on coefficients
+        # Initialize root node with proportional allocations based on coefficients
         coefficients = [dept.coefficient for dept in game.departments]
         total_coeff = sum(coefficients)
-        initial_state = [coeff / total_coeff * total_hours for coeff in coefficients]
+        initial_state = [coeff / total_coeff * self.total_hours for coeff in coefficients]
 
         root = MCTSNode(
             state=initial_state,
@@ -343,8 +342,7 @@ class MCTSSolver(Solver):
             game=game,
             department_index=0,
             num_buckets=self.num_buckets,
-            total_hours=self.total_hours,
-            spread=self.spread
+            total_hours=self.total_hours
         )
 
         best_utility = float('-inf')
@@ -394,23 +392,19 @@ class MCTSNode:
         self.untried_actions = self._get_possible_actions()
 
     def _get_possible_actions(self):
-        """Generate smarter possible actions based on coefficient proportions."""
+        """Generate possible actions ranging from 0 to the remaining hours."""
         if self.department_index >= len(self.state):
             return []
 
-        dept_coefficient = self.game.departments[self.department_index].coefficient
-        total_coefficient = sum(d.coefficient for d in self.game.departments)
-        target_proportion = dept_coefficient / total_coefficient
+        # Calculate the remaining hours that can be allocated
+        used_hours = sum(self.state[:self.department_index])
+        remaining_hours = self.total_hours - used_hours
 
-        # Generate actions around the target proportion
-        base_allocation = target_proportion * self.total_hours
-        spread = self.spread  # Allow ±spread variation around the target
-        min_alloc = max(0, base_allocation - spread)
-        max_alloc = min(self.total_hours, base_allocation + spread)
+        # Ensure remaining_hours is non-negative
+        remaining_hours = max(0, remaining_hours)
 
-        # Create discrete steps within this range
-        step_size = (max_alloc - min_alloc) / self.num_buckets if self.num_buckets > 0 else max_alloc - min_alloc
-        actions = [min_alloc + i * step_size for i in range(self.num_buckets + 1)]
+        # Create discrete actions within this range
+        actions = np.linspace(0, remaining_hours, self.num_buckets + 1).tolist()
         return actions
 
     def is_terminal(self):
@@ -437,14 +431,7 @@ class MCTSNode:
         return child
 
     def smart_rollout(self):
-        """Improved rollout using coefficient-based allocation."""
-        if self.is_terminal():
-            # Normalize the final state and evaluate
-            normalized_state = self.get_normalized_state()
-            self.game.set_allocations(normalized_state)
-            return sum(self.game.compute_utilities())
-
-        # For non-terminal nodes, complete the allocation proportionally
+        """Hybrid rollout by allocating remaining resources based on coefficients with some randomness."""
         current_state = self.state.copy()
         remaining_departments = len(current_state) - self.department_index - 1
 
@@ -458,17 +445,19 @@ class MCTSNode:
                                 for i in range(self.department_index + 1, len(current_state))]
             total_remaining_coeff = sum(remaining_coeffs)
 
-            # Allocate proportionally
-            for i, coeff in enumerate(remaining_coeffs):
+            # Add randomness to coefficients
+            random_factors = np.random.uniform(0.9, 1.1, size=remaining_departments)
+            adjusted_coeffs = remaining_coeffs * random_factors
+            total_adjusted_coeff = sum(adjusted_coeffs)
+
+            # Allocate based on adjusted coefficients
+            for i, adj_coeff in enumerate(adjusted_coeffs):
                 idx = self.department_index + 1 + i
-                if i == len(remaining_coeffs) - 1:
-                    # Last department gets whatever is left
-                    current_state[idx] = remaining_hours
-                else:
-                    # Proportional allocation
-                    alloc = (coeff / total_remaining_coeff) * remaining_hours
-                    current_state[idx] = alloc
-                    remaining_hours -= alloc
+                alloc = (adj_coeff / total_adjusted_coeff) * remaining_hours
+                current_state[idx] = alloc
+        else:
+            # No remaining departments; ensure total allocation doesn't exceed total_hours
+            current_state = self._normalize_allocation(current_state)
 
         # Evaluate the complete allocation
         normalized_state = self._normalize_allocation(current_state)
@@ -486,13 +475,8 @@ class MCTSNode:
         if not self.children:
             return None
 
-        # UCB1 formula with normalized rewards
-        max_reward = max(child.total_reward for child in self.children)
-        min_reward = min(child.total_reward for child in self.children)
-        reward_range = max_reward - min_reward if max_reward > min_reward else 1
-
         def ucb1(child):
-            exploitation = (child.total_reward - min_reward) / reward_range
+            exploitation = child.total_reward / child.visits
             exploration = exploration_constant * math.sqrt(math.log(self.visits) / child.visits)
             return exploitation + exploration
 
@@ -504,10 +488,18 @@ class MCTSNode:
 
     def _normalize_allocation(self, allocation):
         """Helper method to normalize allocations to sum to total_hours."""
+        # Ensure allocations are non-negative before normalization
+        allocation = [max(0, x) for x in allocation]
         total = sum(allocation)
-        if total == 0:
+        if total <= 0:
+            # Distribute total_hours equally if total is zero or negative
             return [self.total_hours / len(allocation)] * len(allocation)
-        return [x * (self.total_hours / total) for x in allocation]
+        normalized = [x * (self.total_hours / total) for x in allocation]
+        # Ensure non-negative allocations after normalization
+        normalized = [max(0, x) for x in normalized]
+        return normalized
+
+
 class AllocationAlgorithmSolver(Solver):
     """
     Solver that implements the iterative allocation algorithm.
@@ -770,7 +762,7 @@ if __name__ == "__main__":
         solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
         solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
         solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
-        solver_mcts = MCTSSolver(iterations=10, exploration_constant=math.sqrt(2), num_buckets=10,
+        solver_mcts = MCTSSolver(iterations=5000, exploration_constant=math.sqrt(2), num_buckets=20,
                                  total_hours=game_mcts.capacity)
         solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
 
