@@ -44,7 +44,7 @@ class Department:
     #     else:
     #         penalty_term = 0
     #     return self.coefficient * np.log(x_i + 1) - penalty_term
-    def utility(self, x_i, total_allocation, alpha, capacity, noise_level=0.2):
+    def utility(self, x_i, total_allocation, alpha, capacity, noise_level=0.4):
         """
         Computes the utility of the department given its allocation,
         adding randomness to the penalty or reward term.
@@ -452,27 +452,23 @@ class MCTSNode:
             # Calculate remaining hours
             used_hours = sum(current_state[:self.department_index + 1])
             remaining_hours = self.total_hours - used_hours
-            if remaining_hours < 0:
-                # Set allocations for remaining departments to zero
-                for idx in range(self.department_index + 1, len(current_state)):
-                    current_state[idx] = 0
-            else:
-                # Get coefficients for remaining departments
-                remaining_coeffs = [self.game.departments[i].coefficient
-                                    for i in range(self.department_index + 1, len(current_state))]
-                total_remaining_coeff = sum(remaining_coeffs)
 
-                # Allocate proportionally
-                for i, coeff in enumerate(remaining_coeffs):
-                    idx = self.department_index + 1 + i
-                    if i == len(remaining_coeffs) - 1:
-                        # Last department gets whatever is left
-                        current_state[idx] = remaining_hours
-                    else:
-                        # Proportional allocation
-                        alloc = (coeff / total_remaining_coeff) * remaining_hours
-                        current_state[idx] = alloc
-                        remaining_hours -= alloc
+            # Get coefficients for remaining departments
+            remaining_coeffs = [self.game.departments[i].coefficient
+                                for i in range(self.department_index + 1, len(current_state))]
+            total_remaining_coeff = sum(remaining_coeffs)
+
+            # Allocate proportionally
+            for i, coeff in enumerate(remaining_coeffs):
+                idx = self.department_index + 1 + i
+                if i == len(remaining_coeffs) - 1:
+                    # Last department gets whatever is left
+                    current_state[idx] = remaining_hours
+                else:
+                    # Proportional allocation
+                    alloc = (coeff / total_remaining_coeff) * remaining_hours
+                    current_state[idx] = alloc
+                    remaining_hours -= alloc
 
         # Evaluate the complete allocation
         normalized_state = self._normalize_allocation(current_state)
@@ -507,14 +503,11 @@ class MCTSNode:
         return self._normalize_allocation(self.state)
 
     def _normalize_allocation(self, allocation):
-        # Ensure allocations are non-negative
-        allocation = [max(0, x) for x in allocation]
+        """Helper method to normalize allocations to sum to total_hours."""
         total = sum(allocation)
         if total == 0:
             return [self.total_hours / len(allocation)] * len(allocation)
         return [x * (self.total_hours / total) for x in allocation]
-
-
 class AllocationAlgorithmSolver(Solver):
     """
     Solver that implements the iterative allocation algorithm.
@@ -747,7 +740,7 @@ if __name__ == "__main__":
     # New main code that runs simulations over different prime capacities
     # Capacities as prime numbers
     # Generate a larger list of prime capacities
-    capacities = generate_prime_capacities(1000, 10000)
+    capacities = generate_prime_capacities(1000, 1100)
 
     results = []
 
@@ -757,7 +750,6 @@ if __name__ == "__main__":
     random.seed(42)
 
     for capacity in capacities:
-        print(capacity)
         base_departments, department_names = create_departments(num_departments=9, lowerbound=0, upperbound=5000)
 
         departments_opt = copy.deepcopy(base_departments)
@@ -778,7 +770,7 @@ if __name__ == "__main__":
         solver_br = BestResponseSolver(max_iterations=5000, tolerance=1e-5)
         solver_rd = ReplicatorDynamicsSolver(time_steps=10000, delta_t=1e-8, tolerance=1e-5)
         solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
-        solver_mcts = MCTSSolver(iterations=1000, exploration_constant=math.sqrt(2), num_buckets=10,
+        solver_mcts = MCTSSolver(iterations=100, exploration_constant=math.sqrt(2), num_buckets=10,
                                  total_hours=game_mcts.capacity, spread=100)
         solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
 
@@ -803,7 +795,7 @@ if __name__ == "__main__":
 
     df_results = pd.DataFrame(results)
 
-    df_results.to_csv('Final_test_total_utilities_by_capacity_r=02.csv', index=False)
+    df_results.to_csv('testing_mctss_total_utilities_by_capacity.csv', index=False)
 
     for index, result in df_results.iterrows():
         capacity = result['Capacity']
