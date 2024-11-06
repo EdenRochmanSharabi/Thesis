@@ -732,7 +732,7 @@ if __name__ == "__main__":
     # New main code that runs simulations over different prime capacities
     # Capacities as prime numbers
     # Generate a larger list of prime capacities
-    capacities = generate_prime_capacities(1000, 2000)
+    capacities = generate_prime_capacities(1000, 10000)
 
     results = []
 
@@ -742,6 +742,7 @@ if __name__ == "__main__":
     random.seed(42)
 
     for capacity in capacities:
+        print(capacity)
         base_departments, department_names = create_departments(num_departments=9, lowerbound=0, upperbound=5000)
 
         departments_opt = copy.deepcopy(base_departments)
@@ -787,7 +788,7 @@ if __name__ == "__main__":
 
     df_results = pd.DataFrame(results)
 
-    df_results.to_csv('total_utilities_by_capacity.csv', index=False)
+    df_results.to_csv('exp_total_utilities_by_capacity.csv', index=False)
 
     for index, result in df_results.iterrows():
         capacity = result['Capacity']
