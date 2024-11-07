@@ -10,6 +10,7 @@ import copy
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
 import pandas as pd
+import sympy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,13 +50,11 @@ class Department:
         Computes the utility of the department given its allocation,
         adding randomness to the penalty or reward term.
         """
-        # Calculate the deterministic part of the utility
         if total_allocation > capacity:
             penalty_term = alpha * x_i * (total_allocation - capacity) / total_allocation
         else:
             penalty_term = 0
 
-        # You can adjust `noise_level` to control the intensity of the randomness
         random_penalty_factor = np.random.uniform(1 - noise_level, 1 + noise_level)
         random_reward_factor = np.random.uniform(1 - noise_level, 1 + noise_level)
 
@@ -102,7 +101,7 @@ class MachineTimeGame:
                 dept.allocation,
                 total_alloc,
                 alpha=self.alpha,
-                capacity=self.capacity  # Pass capacity here
+                capacity=self.capacity
             )
             utilities.append(util)
         return utilities
@@ -155,21 +154,17 @@ class OptimizationSolver(Solver):
         """
         num_departments = len(game.departments)
         if self.initial_guess is None:
-            # Default initial guess: equal allocation
             x0 = np.full(num_departments, game.capacity / num_departments)
         else:
             x0 = self.initial_guess
 
-        # Bounds: allocations must be non-negative
         bounds = [(0, None) for _ in range(num_departments)]
 
-        # Constraints: total allocation must equal capacity
         constraints = {
             'type': 'eq',
             'fun': lambda x: sum(x) - game.capacity  # Ensure total allocation equals capacity
         }
 
-        # Objective function: negative total utility (since we will minimize)
         def objective(allocations):
             total_alloc = sum(allocations)
             total_utility = 0
@@ -181,9 +176,8 @@ class OptimizationSolver(Solver):
                     capacity=game.capacity
                 )
                 total_utility += util
-            return -total_utility  # Negative for minimization
+            return -total_utility
 
-        # Minimize the negative total utility
         result = minimize(
             objective,
             x0,
@@ -195,7 +189,6 @@ class OptimizationSolver(Solver):
 
         try:
             if result.success:
-                # Update game with the optimal allocations
                 game.set_allocations(result.x)
                 return result.x
             else:
@@ -219,7 +212,6 @@ class BestResponseSolver(Solver):
                 bounds = [(0, game.capacity - others_sum)]
                 x0 = np.array([allocations[i]])
 
-                # Use the static method for best response calculation
                 allocations[i] = Solver.compute_best_response(
                     dept, x0, others_sum, game.alpha, bounds, game.capacity
                 )
@@ -249,33 +241,26 @@ class ReplicatorDynamicsSolver(Solver):
             total_alloc = sum(allocations)
             utilities = []
 
-            # Compute utilities for current allocations
             for i, dept in enumerate(game.departments):
                 util = dept.utility(allocations[i], total_alloc, game.alpha, game.capacity)
                 utilities.append(util)
 
-            # Compute average utility
             average_utility = sum(utilities) / num_departments if num_departments > 0 else 1
 
-            # Update allocations using replicator dynamics
             for j in range(num_departments):
                 allocations[j] += self.delta_t * allocations[j] * (utilities[j] - average_utility)
 
-            # Ensure allocations are non-negative
             allocations = np.maximum(allocations, 0)
 
-            # Normalize allocations to sum to capacity
             total_alloc = sum(allocations)
             if total_alloc > 0:
                 allocations = (allocations / total_alloc) * game.capacity
             else:
                 allocations = np.full(num_departments, game.capacity / num_departments)
 
-            # Check for convergence
             if np.linalg.norm(allocations - old_allocations) < self.tolerance:
                 break
 
-        # Update game with the final allocations
         game.set_allocations(allocations)
         return allocations
 class FictitiousPlaySolver(Solver):
@@ -329,10 +314,9 @@ class MCTSSolver(Solver):
         self.spread = spread
 
     def solve(self, game: MachineTimeGame):
-        total_hours = game.capacity  # Use game's capacity
-        self.total_hours = total_hours  # Update total_hours in the solver
+        total_hours = game.capacity
+        self.total_hours = total_hours
 
-        # Initialize the root node with proportional allocation based on coefficients
         coefficients = [dept.coefficient for dept in game.departments]
         total_coeff = sum(coefficients)
         initial_state = [coeff / total_coeff * total_hours for coeff in coefficients]
@@ -372,7 +356,6 @@ class MCTSSolver(Solver):
             # Backpropagation
             node.backpropagate(reward)
 
-        # If no better solution found, use the most visited child's allocation
         if best_allocation is None and root.children:
             best_child = max(root.children, key=lambda n: n.visits)
             best_allocation = best_child.get_normalized_state()
@@ -513,8 +496,6 @@ class MCTSNode:
         if total == 0:
             return [self.total_hours / len(allocation)] * len(allocation)
         return [x * (self.total_hours / total) for x in allocation]
-
-
 class AllocationAlgorithmSolver(Solver):
     """
     Solver that implements the iterative allocation algorithm.
@@ -578,6 +559,7 @@ class AllocationAlgorithmSolver(Solver):
         if total == 0:
             return np.full(len(allocations), self.game.capacity / len(allocations))
         return allocations * (self.game.capacity / total)
+
 def generate_allocation_table(games_local, department_local):
     allocation_data = []
     for i, dept_name in enumerate(department_local):
@@ -683,7 +665,7 @@ def plot_utilities(solver_games, department_labels):
 def parallelization_solver(args):
     solver, game = args
     solver.solve(game)
-    return game  # Return the game for later access
+    return game
 def generate_prime_capacities(start, end):
     """Generates a list of prime numbers within a given range."""
     primes = []
@@ -747,8 +729,10 @@ if __name__ == "__main__":
     # New main code that runs simulations over different prime capacities
     # Capacities as prime numbers
     # Generate a larger list of prime capacities
-    capacities = generate_prime_capacities(1000, 10000)
-
+    lower_limit = 100
+    upper_limit = 1000000
+    capacities = generate_prime_capacities(lower_limit, upper_limit)
+    print(sympy.primepi(upper_limit) - sympy.primepi(lower_limit - 1))
     results = []
 
     solver_names = ['Optimization', 'Best Response', 'Replicator Dynamics',
@@ -758,7 +742,7 @@ if __name__ == "__main__":
 
     for capacity in capacities:
         print(capacity)
-        base_departments, department_names = create_departments(num_departments=9, lowerbound=0, upperbound=5000)
+        base_departments, department_names = create_departments(num_departments=20, lowerbound=0, upperbound=5000)
 
         departments_opt = copy.deepcopy(base_departments)
         departments_br = copy.deepcopy(base_departments)
@@ -780,8 +764,8 @@ if __name__ == "__main__":
         solver_fp = FictitiousPlaySolver(max_iterations=5000, tolerance=1e-5)
         solver_mcts = MCTSSolver(iterations=1000, exploration_constant=math.sqrt(2), num_buckets=10,
                                  total_hours=game_mcts.capacity, spread=100)
-        solver_alloc = AllocationAlgorithmSolver(delta=0.00001, activation_prob=0.01, max_iterations=1000000)
-
+        solver_alloc = AllocationAlgorithmSolver(delta=1, activation_prob=0.8, max_iterations=1000000)
+        # solver_alloc = AllocationAlgorithmSolver(delta=1, activation_prob=0.8, max_iterations=1000000) this works much much better
         solvers_and_games = [
             (solver_opt, game_opt),
             (solver_br, game_br),
@@ -803,7 +787,7 @@ if __name__ == "__main__":
 
     df_results = pd.DataFrame(results)
 
-    df_results.to_csv('Final_test_total_utilities_by_capacity_r=02.csv', index=False)
+    df_results.to_csv('Mighty_test_total_utilities_by_capacity.csv', index=False)
 
     for index, result in df_results.iterrows():
         capacity = result['Capacity']
