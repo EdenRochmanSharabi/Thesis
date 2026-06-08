@@ -1,0 +1,6 @@
+.idea/
+.DS_Store
+.ipynb_checkpoints/
+.codebuddy/
+__pycache__/
+*.pyc

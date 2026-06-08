@@ -31,7 +31,7 @@ class Department:
     @jit(nopython=True)
     def _utility_function(x_i, coeff, total_alloc, alpha, capacity):
         """
-        Computes the utility of the department with JIT optimization. JIT stands for Just in testing Eden, don't play god with package you dont fully control.
+        Computes the utility of the department with JIT optimization.
         """
         penalty = alpha * x_i * (total_alloc - capacity) / max(total_alloc, 1e-8) if total_alloc > capacity else 0
         return coeff * np.log(x_i + 1) - penalty
